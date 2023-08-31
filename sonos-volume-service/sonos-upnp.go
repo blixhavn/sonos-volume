@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/xml"
-	"flag"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -16,6 +16,11 @@ type Root struct {
 
 type Device struct {
 	RoomName string `xml:"roomName"`
+}
+
+type Sonos struct {
+	avTransportService      *av1.AVTransport1
+	renderingControlService *av1.RenderingControl1
 }
 
 func getRoomName(location string) (string, error) {
@@ -33,21 +38,60 @@ func getRoomName(location string) (string, error) {
 	return root.Device.RoomName, nil
 }
 
-func main() {
-	var preferredRoomName string
-	flag.StringVar(&preferredRoomName, "room-name", "", "the preferred room name")
-	flag.Parse()
+func (s *Sonos) GetVolume() (uint16, error) {
+	return s.renderingControlService.GetVolume(0, "Master")
+}
 
-	if preferredRoomName == "" {
-		fmt.Println("Usage: sonos-volume-service --room-name=<preferred-room-name>")
-		return
+func (s *Sonos) SetVolume(volume uint16) error {
+	return s.renderingControlService.SetVolume(0, "Master", volume)
+}
+
+func (s *Sonos) IncreaseVolume() error {
+	volume, err := s.GetVolume()
+	if err != nil {
+		return err
 	}
+
+	return s.SetVolume(volume + 1)
+}
+
+func (s *Sonos) DecreaseVolume() error {
+	volume, err := s.GetVolume()
+	if err != nil {
+		return err
+	}
+
+	return s.SetVolume(volume - 1)
+}
+
+func (s *Sonos) Play() error {
+	return s.avTransportService.Play(0, "1")
+}
+
+func (s *Sonos) Pause() error {
+	return s.avTransportService.Pause(0)
+}
+
+func (s *Sonos) PlayPause() error {
+	currentTransportState, _, _, err := s.avTransportService.GetTransportInfo(0)
+	if err != nil {
+		return err
+	}
+
+	if currentTransportState == "PLAYING" {
+		return s.Pause()
+	} else {
+		return s.Play()
+	}
+}
+
+func NewSonos(preferredRoomName string) (*Sonos, error) {
 
 	// Discover UPnP devices on the network
 	devices, err := goupnp.DiscoverDevices("urn:schemas-upnp-org:device:ZonePlayer:1")
 	if err != nil {
 		fmt.Println(err)
-		return
+		return nil, err
 	}
 
 	// Select the Sonos speakers based on the room
@@ -57,7 +101,7 @@ func main() {
 		roomName, err := getRoomName(device.Location.String())
 		if err != nil {
 			fmt.Println(err)
-			return
+			return nil, err
 		}
 
 		if roomName == preferredRoomName {
@@ -70,22 +114,24 @@ func main() {
 
 	if selectedDevice == nil {
 		fmt.Println("No Sonos speakers found in the specified room")
-		return
+		return nil, errors.New("No Sonos speakers found in the specified room")
+	}
+
+	avTransportServices, err := av1.NewAVTransport1ClientsFromRootDevice(selectedDevice, nil)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
 	}
 
 	// Get the RenderingControl service
-	renderingControlService, err := av1.NewRenderingControl1ClientsFromRootDevice(selectedDevice, nil)
+	renderingControlServices, err := av1.NewRenderingControl1ClientsFromRootDevice(selectedDevice, nil)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return nil, err
 	}
 
-	// Get the current volume
-	volume, err := renderingControlService[0].GetVolume(0, "Master")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	fmt.Println("Current Volume:", volume)
+	return &Sonos{
+		avTransportService:      avTransportServices[0],
+		renderingControlService: renderingControlServices[0],
+	}, nil
 }
